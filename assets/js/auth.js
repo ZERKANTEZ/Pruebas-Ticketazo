@@ -8,6 +8,7 @@ const Auth = (() => {
   let _sbReady  = false;
   let _sb       = null;
   let _applying = false;
+  let _pendingApply = null;
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function _normalizeRole(raw) {
@@ -97,7 +98,13 @@ const Auth = (() => {
 
   // ── Lógica de Sesión ──────────────────────────────────────────────────────
   async function _applySession(sbSession, isExplicitLogin = false) {
-    if (_applying) return;
+    if (_applying) {
+      _pendingApply = {
+        session: sbSession,
+        isExplicitLogin: Boolean(_pendingApply?.isExplicitLogin || isExplicitLogin)
+      };
+      return;
+    }
     _applying = true;
 
     try {
@@ -105,8 +112,9 @@ const Auth = (() => {
         _session = { name: '', role: '', email: '' };
         if (typeof App !== 'undefined') App.updateNav();
         if (typeof Zones !== 'undefined') Zones.init();
-        // Solo cerramos si no hay error de login pendiente
-        if (!document.getElementById('login-err')?.textContent) closeModal();
+        // No cerrar el modal aquí: durante el arranque inicial de Supabase
+        // este camino puede ejecutarse mientras el usuario ya está intentando loguearse.
+        // Si lo cerramos, el modal "rebota" y los errores quedan ocultos.
         return;
       }
 
@@ -141,6 +149,11 @@ const Auth = (() => {
       console.error("[Auth] Error aplicando sesión:", err);
     } finally {
       _applying = false;
+      if (_pendingApply) {
+        const nextApply = _pendingApply;
+        _pendingApply = null;
+        queueMicrotask(() => { void _applySession(nextApply.session, nextApply.isExplicitLogin); });
+      }
     }
   }
 
@@ -233,7 +246,13 @@ const Auth = (() => {
     const el = document.getElementById(id);
     if (el) { el.classList.remove('hidden'); const span = el.querySelector('span'); if (span) span.textContent = msg; }
   }
-  function _hideErr(id) { document.getElementById(id)?.classList.add('hidden'); }
+  function _hideErr(id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.add('hidden');
+    const span = el.querySelector('span');
+    if (span) span.textContent = '';
+  }
   function _setBusy(id, busy) { const btn = document.getElementById(id); if (btn) btn.disabled = busy; }
   function showPass(id, show) { const el = document.getElementById(id); if (el) el.type = show ? 'text' : 'password'; }
 
@@ -244,8 +263,10 @@ const Auth = (() => {
       const { createClient } = window.supabase;
       _sb = createClient('https://urumaghjardjgdveblxa.supabase.co', 'sb_publishable_hpITakDbpUWFx3Tv9AJg-A_MnyJOtd0');
       _sbReady = true;
-      _sb.auth.onAuthStateChange(async (event, session) => {
-        await _applySession(session, event === 'SIGNED_IN');
+      _sb.auth.onAuthStateChange((event, session) => {
+        // Evita ejecutar trabajo async pesado dentro del callback interno de Supabase.
+        // En móvil puede provocar que el login parezca "rebotar" o no termine de aplicar.
+        setTimeout(() => { void _applySession(session, event === 'SIGNED_IN'); }, 0);
       });
       const { data: { session } } = await _sb.auth.getSession();
       if (session) await _applySession(session, false);

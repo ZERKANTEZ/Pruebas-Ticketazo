@@ -9,17 +9,23 @@ window.App = (() => {
   function navigate(page) {
     document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
     document.getElementById(`page-${page}`)?.classList.add('active');
-    window.scrollTo({ top: 0, behavior: 'instant' });
+    window.scrollTo({ top: 0, behavior: 'auto' });
     _prev    = _current;
     _current = page;
 
     // El dashboard tiene su propio layout — ocultar todo lo demás
     const isDash = page === 'dashboard';
+    const mobileMenu = document.getElementById('mobile-menu');
+    mobileMenu?.classList.remove('open');
     document.getElementById('navbar')?.style.setProperty('display', isDash ? 'none' : '');
-    document.getElementById('mobile-menu')?.style.setProperty('display', isDash ? 'none' : '');
+    mobileMenu?.style.setProperty('display', isDash ? 'none' : '');
     document.getElementById('main-footer')?.style.setProperty('display', isDash ? 'none' : '');
+    if (typeof Zones !== 'undefined' && typeof Zones.closeSidebar === 'function') {
+      Zones.closeSidebar();
+    }
     // Force body background to match dashboard when on dashboard
     document.body.style.background = isDash ? '#f8fafc' : '';
+    document.body.style.overflow = (isDash && window.innerWidth > 900) ? 'hidden' : '';
   }
 
   function goBack() {

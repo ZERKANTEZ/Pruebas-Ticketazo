@@ -7,28 +7,88 @@
 window.Profile = (() => {
 
   // ─── State ────────────────────────────────────────────────
-  const state = {
-    liked: new Set(),       // IDs de eventos/tours con "me gusta"
-    tickets: [],            // Boletos comprados (mock)
-    registeredCard: null,   // { last4, brand, expiry } | null
+  const STORAGE_KEYS = {
+    tickets: 'ticketazo.profile.tickets.v1',
+    refunds: 'ticketazo.profile.refunds.v1',
+    organizerCard: 'ticketazo.profile.card.v1',
   };
 
-  // Mock tickets — en producción vendrían del backend
-  const MOCK_TICKETS = [
-    { id: 'T-8821', eventId: 'e1',  zone: 'vip',   purchaseDate: '2026-04-01', qrCode: 'TKZ-E1-VIP-8821-X9K2' },
-    { id: 'T-8822', eventId: 'e3',  zone: 'plata',  purchaseDate: '2026-04-03', qrCode: 'TKZ-E3-PLT-8822-M7R4' },
-    { id: 'T-8823', eventId: 'e4',  zone: 'oro',   purchaseDate: '2026-04-10', qrCode: 'TKZ-E4-ORO-8823-P2W6' },
+  const INITIAL_TICKETS = [
+    { id: 'T-8821', eventId: 'e1', zone: 'vip',   purchaseDate: '2026-04-01', qrCode: 'TKZ-E1-VIP-8821-X9K2' },
+    { id: 'T-8822', eventId: 'e3', zone: 'plata', purchaseDate: '2026-04-03', qrCode: 'TKZ-E3-PLT-8822-M7R4' },
+    { id: 'T-8823', eventId: 'e4', zone: 'oro',   purchaseDate: '2026-04-10', qrCode: 'TKZ-E4-ORO-8823-P2W6' },
   ];
+
+  const state = {
+    liked: new Set(),       // IDs de eventos/tours con "me gusta"
+    tickets: [],            // Boletos comprados
+    refunds: [],            // Solicitudes de reembolso del usuario
+    registeredCard: null,   // { last4, brand, holder } | null
+  };
+
+  function _loadJSON(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : fallback;
+    } catch (_err) {
+      return fallback;
+    }
+  }
+
+  function _saveJSON(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (_err) {
+      // Ignorar errores de almacenamiento en este demo
+    }
+  }
+
+  function _persistTickets() { _saveJSON(STORAGE_KEYS.tickets, state.tickets); }
+  function _persistRefunds() { _saveJSON(STORAGE_KEYS.refunds, state.refunds); }
+  function _persistCard()    { _saveJSON(STORAGE_KEYS.organizerCard, state.registeredCard); }
+
+  function _hydrateState() {
+    state.tickets = _loadJSON(STORAGE_KEYS.tickets, INITIAL_TICKETS.map(ticket => ({ ...ticket })));
+    state.refunds = _loadJSON(STORAGE_KEYS.refunds, []);
+    state.registeredCard = _loadJSON(STORAGE_KEYS.organizerCard, null);
+  }
+
+  function _findEvent(eventId) {
+    return EVENTS.find(ev => ev.id === eventId) || null;
+  }
+
+  function _getTicketPrice(ticket) {
+    if (!ticket) return 0;
+    const event = _findEvent(ticket.eventId);
+    if (!event) return 0;
+
+    const normalizedZone = String(ticket.zone || '').trim().toLowerCase();
+    const zoneMap = typeof Zones !== 'undefined' && Zones.getZones
+      ? Zones.getZones(ticket.eventId).find(z => String(z.name || '').trim().toLowerCase() === normalizedZone)
+      : null;
+
+    if (zoneMap?.price) return zoneMap.price;
+    return event.prices?.[normalizedZone] || 0;
+  }
+
+  function _getRefundRequest(ticketId) {
+    return state.refunds.find(refund => refund.ticketId === ticketId) || null;
+  }
+
+  _hydrateState();
 
   function addTickets(eventId, zone, qty) {
     for (let i = 0; i < qty; i++) {
-        const id = 'T-' + Math.floor(1000 + Math.random() * 9000);
-        MOCK_TICKETS.unshift({
-            id, eventId, zone,
-            purchaseDate: new Date().toISOString(),
-            qrCode: `TKZ-${eventId.toUpperCase()}-${zone.toUpperCase().replace(/\\s+/g,'').substring(0,3)}-${id}-${Math.random().toString(36).substring(2,6).toUpperCase()}`
-        });
+      const id = 'T-' + Math.floor(1000 + Math.random() * 9000);
+      state.tickets.unshift({
+        id,
+        eventId,
+        zone,
+        purchaseDate: new Date().toISOString(),
+        qrCode: `TKZ-${eventId.toUpperCase()}-${zone.toUpperCase().replace(/\\s+/g,'').substring(0,3)}-${id}-${Math.random().toString(36).substring(2,6).toUpperCase()}`
+      });
     }
+    _persistTickets();
   }
 
   // ─── Likes ────────────────────────────────────────────────
@@ -204,12 +264,14 @@ window.Profile = (() => {
       holder: name,
     };
 
+    _persistCard();
     render(); // Re-render profile with card registered
   }
 
   function removeCard() {
     if (!confirm('¿Estás seguro de que deseas eliminar esta tarjeta?')) return;
     state.registeredCard = null;
+    _persistCard();
     render();
   }
 
@@ -263,14 +325,27 @@ window.Profile = (() => {
 
   // ─── Tickets ──────────────────────────────────────────────
   function renderTickets(sess) {
-    const tickets = Auth.session() ? MOCK_TICKETS : [];
+    const tickets = Auth.session() ? state.tickets : [];
 
     const content = tickets.length
       ? `<div class="tickets-list">
           ${tickets.map(t => {
-            const ev = EVENTS.find(e => e.id === t.eventId);
+            const ev = _findEvent(t.eventId);
             if (!ev) return '';
-            const d  = new Date(ev.date);
+            const d = new Date(ev.date);
+            const refund = _getRefundRequest(t.id);
+            const refundStatus = refund?.status || 'none';
+            const refundTone = refundStatus === 'approved' ? 'approved' : refundStatus === 'rejected' ? 'rejected' : 'pending';
+            const refundLabel = refundStatus === 'approved'
+              ? 'Reembolso aprobado'
+              : refundStatus === 'rejected'
+                ? 'Solicitud rechazada'
+                : 'Solicitud enviada al tesorero';
+            const refundMessage = refundStatus === 'approved'
+              ? 'El tesorero aprobó tu solicitud. Este boleto ya quedó marcado para devolución.'
+              : refundStatus === 'rejected'
+                ? 'La solicitud fue rechazada. Puedes volver a enviarla si deseas corregir el motivo.'
+                : 'Si no puedes asistir, puedes enviar la solicitud de reembolso al tesorero desde aquí.';
             return `
               <div class="ticket-card" id="tc-${t.id}">
                 <div class="ticket-top">
@@ -300,6 +375,22 @@ window.Profile = (() => {
                       Comprado el ${new Date(t.purchaseDate).toLocaleDateString('es-ES')}
                     </div>
                   </div>
+                  <div class="ticket-refund-panel">
+                    <div class="ticket-refund-title">Reembolso</div>
+                    <div class="ticket-refund-copy">${refundMessage}</div>
+                    ${refund
+                      ? `<div class="ticket-refund-status ticket-refund-status--${refundTone}">${refundLabel}</div>
+                         <div class="ticket-refund-meta">Motivo: ${refund.reason}</div>
+                         <div class="ticket-refund-meta">Registrado el ${new Date(refund.requestedAt).toLocaleDateString('es-ES')}</div>
+                         ${refundStatus === 'rejected'
+                           ? `<button class="ticket-refund-btn" onclick="event.stopPropagation(); Profile.requestRefund('${t.id}')">
+                                Solicitar de nuevo
+                              </button>`
+                           : ''}`
+                      : `<button class="ticket-refund-btn" onclick="event.stopPropagation(); Profile.requestRefund('${t.id}')">
+                           Solicitar reembolso
+                         </button>`}
+                  </div>
                 </div>
               </div>`;
           }).join('')}
@@ -323,6 +414,76 @@ window.Profile = (() => {
       </div>`;
   }
 
+  function requestRefund(ticketId) {
+    if (!Auth.isLoggedIn()) {
+      Auth.openModal();
+      return;
+    }
+
+    const ticket = state.tickets.find(item => item.id === ticketId);
+    if (!ticket) return;
+
+    const current = _getRefundRequest(ticketId);
+    if (current?.status === 'pending') {
+      alert('Esta solicitud ya fue enviada al tesorero.');
+      return;
+    }
+
+    if (current?.status === 'approved') {
+      alert('Este boleto ya tiene un reembolso aprobado.');
+      return;
+    }
+
+    const reason = window.prompt('Escribe brevemente el motivo del reembolso.', current?.reason || '');
+    if (reason === null) return;
+
+    const cleanReason = reason.trim();
+    if (!cleanReason) {
+      alert('Necesitamos el motivo del reembolso para registrarlo.');
+      return;
+    }
+
+    const event = _findEvent(ticket.eventId);
+    const now = new Date().toISOString();
+    const session = Auth.session() || {};
+    const payload = {
+      id: current?.id || `RF-${Date.now()}`,
+      ticketId,
+      eventId: ticket.eventId,
+      eventTitle: event?.title || 'Evento',
+      zone: ticket.zone,
+      amount: _getTicketPrice(ticket),
+      userName: session.name || 'Cliente',
+      userEmail: session.email || 'cliente@ticketazo.mx',
+      reason: cleanReason,
+      requestedAt: now,
+      updatedAt: now,
+      status: 'pending',
+    };
+
+    if (current) {
+      Object.assign(current, payload);
+    } else {
+      state.refunds.unshift(payload);
+    }
+
+    _persistRefunds();
+    render();
+  }
+
+  function resolveRefund(refundId, status) {
+    const refund = state.refunds.find(item => item.id === refundId);
+    if (!refund) return;
+
+    refund.status = status;
+    refund.updatedAt = new Date().toISOString();
+    _persistRefunds();
+
+    if (document.getElementById('page-profile')?.classList.contains('active')) {
+      render();
+    }
+  }
+
   function toggleQR(ticketId) {
     const section = document.getElementById(`qr-${ticketId}`);
     const btn     = section?.previousElementSibling?.querySelector('.ticket-qr-toggle');
@@ -334,7 +495,7 @@ window.Profile = (() => {
     if (isOpen) {
       const canvas = document.getElementById(`qrc-${ticketId}`);
       if (canvas && !canvas.dataset.generated) {
-        const ticket = MOCK_TICKETS.find(t => t.id === ticketId);
+        const ticket = state.tickets.find(t => t.id === ticketId);
         if (ticket) drawQR(canvas, ticket.qrCode);
         canvas.dataset.generated = 'true';
       }
@@ -435,7 +596,7 @@ window.Profile = (() => {
   }
 
   function generateQRCodes() {
-    MOCK_TICKETS.forEach(t => {
+    state.tickets.forEach(t => {
       const canvas = document.getElementById(`qrc-${t.id}`);
       if (canvas && !canvas.dataset.generated && document.getElementById(`qr-${t.id}`)?.classList.contains('open')) {
         drawQR(canvas, t.qrCode);
@@ -476,9 +637,10 @@ window.Profile = (() => {
     open, render,
     toggleEmailEdit, saveEmail,
     toggleLike, isLiked,
-    toggleQR,
+    toggleQR, requestRefund, resolveRefund,
     saveCard, removeCard, hasCard,
     fmtCard, fmtExp, addTickets,
+    getRefundRequests: () => state.refunds,
     getState: () => state,
   };
 })();

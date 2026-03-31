@@ -115,9 +115,8 @@ nav.scrolled {
 .mobile-nav-link:hover { color: var(--color-pink); }
 
 @media (max-width: 768px) {
-  .nav-right .nav-link,
-  .nav-right #btn-login,
-  .nav-right #btn-logout {
+  .nav-right > button,
+  .nav-right .nav-link {
     display: none;
   }
   .hamburger { display: flex; }

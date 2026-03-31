@@ -17,6 +17,12 @@ window.Zones = (() => {
     '#4ade80','#38bdf8','#fbbf24','#94a3b8','#f472b6',
   ];
 
+  const FIXED_TICKET_TIERS = [
+    { key:'vip',     label:'VIP',     color:COLORS[0], price:1500, capacity:200, note:'Acceso premium' },
+    { key:'oro',     label:'Oro',     color:COLORS[3], price:1000, capacity:400, note:'Zona preferente' },
+    { key:'general', label:'General', color:COLORS[1], price:500,  capacity:1000, note:'Acceso general' },
+  ];
+
   const _state = {};
 
   /* ── Init ── */
@@ -40,6 +46,11 @@ window.Zones = (() => {
   function getStatus(id)   { return _state[id]?.status || 'draft'; }
   function getMinPrice(id) { const z = getZones(id); return z.length ? Math.min(...z.map(z => z.price)) : 0; }
   function getPending()    { return EVENTS.filter(ev => _state[ev.id]?.status === 'pending'); }
+  function _getRefundRequests() {
+    return typeof Profile !== 'undefined' && Profile.getRefundRequests
+      ? Profile.getRefundRequests()
+      : [];
+  }
 
   /* ══════════════════════════════════════════════════════════
      ABRIR DASHBOARD
@@ -52,38 +63,48 @@ window.Zones = (() => {
     if (!['organizer','treasurer','admin'].includes(role)) {
       alert('No tienes acceso a este panel.'); return;
     }
-    _buildNav();
+    const tabs = _buildNav();
     _buildUser();
+    closeSidebar();
     App.navigate('dashboard');
+    requestAnimationFrame(() => _ensureActivePanel(tabs[0]?.key));
+  }
+
+  function _getTabs(role) {
+    const pend = getPending().length;
+    const refundPend = _getRefundRequests().filter(refund => refund.status === 'pending').length;
+    if (role === 'admin') {
+      return [
+        { key:'overview',  icon:Icons.chart,                   label:'Resumen General',     badge:0    },
+        { key:'events',    icon:Icons.ticket,                  label:'Todos los Eventos',   badge:0    },
+        { key:'new',       icon:Icons._icon('add_circle', 18), label:'Crear Evento',        badge:0    },
+        { key:'promote',   icon:Icons._icon('campaign', 18),   label:'Promocionar Evento',  badge:0    },
+        { key:'review',    icon:Icons._icon('fact_check', 18), label:'Revisar Precios',     badge:pend },
+        { key:'sales',     icon:Icons.chart,                   label:'Ventas por Evento',   badge:0    },
+        { key:'refunds',   icon:Icons._icon('reply', 18),      label:'Reembolsos',          badge:0    },
+      ];
+    }
+
+    if (role === 'treasurer') {
+      return [
+        { key:'review',  icon:Icons._icon('fact_check', 18), label:'Revisar Precios',        badge:pend },
+        { key:'sales',   icon:Icons.chart,                   label:'Ventas por Evento',      badge:0    },
+        { key:'payouts', icon:Icons.card,                    label:'Pagos a Organizadores',  badge:0    },
+        { key:'refunds', icon:Icons._icon('reply', 18),      label:'Reembolsos',             badge:refundPend },
+      ];
+    }
+
+    return [
+      { key:'events', icon:Icons.ticket,                  label:'Mis Eventos',  badge:0 },
+      { key:'new',    icon:Icons._icon('add_circle', 18), label:'Crear Evento', badge:0 }
+    ];
   }
 
   function _buildNav() {
     const nav   = document.getElementById('db-nav');
-    if (!nav) return;
+    if (!nav) return [];
     const role  = Auth.session().role;
-    const isOrg = role === 'organizer';
-    const isTrea= role === 'treasurer';
-    const pend  = getPending().length;
-
-    const isAdmin = role === 'admin';
-
-    const tabs = isAdmin ? [
-      { key:'overview',  icon:Icons.chart,                          label:'Resumen General',     badge:0    },
-      { key:'events',    icon:Icons.ticket,                         label:'Todos los Eventos',   badge:0    },
-      { key:'new',       icon:Icons._icon('add_circle', 18),        label:'Crear Evento',         badge:0    },
-      { key:'promote',   icon:Icons._icon('campaign', 18),          label:'Promocionar Evento',  badge:0    },
-      { key:'review',    icon:Icons._icon('fact_check', 18),        label:'Revisar Precios',      badge:pend },
-      { key:'sales',     icon:Icons.chart,                          label:'Ventas por Evento',   badge:0    },
-      { key:'refunds',   icon:Icons._icon('reply', 18),             label:'Reembolsos',           badge:0    },
-    ] : isTrea ? [
-      { key:'review',  icon:Icons._icon('fact_check', 18), label:'Revisar Precios', badge:pend },
-      { key:'sales',   icon:Icons.chart, label:'Ventas por Evento',     badge:0    },
-      { key:'payouts', icon:Icons.card,  label:'Pagos a Organizadores', badge:0    },
-      { key:'refunds', icon:Icons._icon('reply', 18),  label:'Reembolsos',            badge:0    },
-    ] : [
-      { key:'events', icon:Icons.ticket, label:'Mis Eventos', badge:0    },
-      { key:'new',    icon:Icons._icon('add_circle', 18), label:'Crear Evento', badge:0 }
-    ];
+    const tabs = _getTabs(role);
 
     nav.innerHTML = tabs.map((t, i) => `
         <button class="db-nav-btn${i===0?' active':''}" id="tab-${t.key}"
@@ -96,12 +117,8 @@ window.Zones = (() => {
     // Vaciar todos los paneles (el usuario puede cambiar de rol entre sesiones)
     document.querySelectorAll('.db-panel').forEach(p => { p.classList.remove('active'); p.innerHTML = ''; });
 
-    // Activar y llenar el primer panel
-    const firstPanel = document.getElementById(`panel-${tabs[0].key}`);
-    if (firstPanel) { firstPanel.classList.add('active'); firstPanel.innerHTML = _panelContent(tabs[0].key); }
-
-    const titleEl = document.getElementById('db-topbar-title');
-    if (titleEl) titleEl.textContent = tabs[0].label;
+    _activatePanel(tabs[0]?.key);
+    return tabs;
   }
 
   function _buildUser() {
@@ -132,24 +149,58 @@ window.Zones = (() => {
     document.querySelectorAll('.db-nav-btn').forEach(b => b.classList.remove('active'));
     if (btn) btn.classList.add('active');
 
-    // 2. Show panel
+    _activatePanel(key);
+
+    if (window.innerWidth <= 900) {
+      closeSidebar();
+    }
+  }
+
+  function _panelTitle(key) {
+    const titles = {
+      events:'Todos los Eventos',
+      new:'Crear Evento',
+      review:'Revisión de Precios',
+      sales:'Ventas por Evento',
+      promote:'Promocionar Evento',
+      overview:'Resumen General',
+      refunds:'Reembolsos',
+      payouts:'Pagos a Organizadores',
+    };
+    return titles[key] || 'Panel de Control';
+  }
+
+  function _activatePanel(key) {
+    if (!key) return null;
+
     document.querySelectorAll('.db-panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(`panel-${key}`);
-    if (!panel) return;
+    if (!panel) return null;
+
     panel.classList.add('active');
+    if (panel.innerHTML.trim() === '') {
+      panel.innerHTML = _panelContent(key);
+    }
 
-    // 3. Fill if empty
-    if (panel.innerHTML.trim() === '') panel.innerHTML = _panelContent(key);
+    const titleEl = document.getElementById('db-topbar-title');
+    if (titleEl) titleEl.textContent = _panelTitle(key);
 
-    // 4. Title
-    const titles = {
-      events:'Todos los Eventos', new:'Crear Evento',
-      review:'Revisión de Precios', sales:'Ventas por Evento',
-      promote:'Promocionar Evento', overview:'Resumen General', 
-      refunds:'Reembolsos', payouts:'Pagos a Organizadores',
-    };
-    const t = document.getElementById('db-topbar-title');
-    if (t && titles[key]) t.textContent = titles[key];
+    const content = document.querySelector('.db-content');
+    if (content) content.scrollTo({ top: 0, behavior: 'auto' });
+
+    return panel;
+  }
+
+  function _ensureActivePanel(fallbackKey) {
+    const activePanel = document.querySelector('.db-panel.active');
+    if (activePanel) {
+      if (activePanel.innerHTML.trim() === '') {
+        activePanel.innerHTML = _panelContent(activePanel.id.replace('panel-', ''));
+      }
+      return activePanel;
+    }
+
+    return _activatePanel(fallbackKey);
   }
 
   function _panelContent(key) {
@@ -365,6 +416,27 @@ window.Zones = (() => {
     setTimeout(()=>{document.addEventListener('click',function h(e){if(!pop.contains(e.target)){pop.remove();document.removeEventListener('click',h);}});},0);
   }
 
+  function _fixedTierRow(tier) {
+    return `
+      <div class="db-tier-row" data-tier="${tier.key}">
+        <div class="db-tier-badge">
+          <span class="db-tier-dot" style="background:${tier.color}"></span>
+          <div class="db-tier-copy">
+            <div class="db-tier-name">${tier.label}</div>
+            <div class="db-tier-note">${tier.note}</div>
+          </div>
+        </div>
+        <div class="db-field db-field--compact">
+          <label class="db-label">Precio</label>
+          <input class="db-input" type="number" min="0" value="${tier.price}" />
+        </div>
+        <div class="db-field db-field--compact">
+          <label class="db-label">Capacidad</label>
+          <input class="db-input" type="number" min="1" value="${tier.capacity}" />
+        </div>
+      </div>`;
+  }
+
   /* ══════════════════════════════════════════════════════════
      ORGANIZADOR — CREAR EVENTO
   ══════════════════════════════════════════════════════════ */
@@ -425,6 +497,61 @@ window.Zones = (() => {
   let _nzc=1;
   function _newZoneRow(i,d){d=d||{};const color=d.color||COLORS[i%COLORS.length];return`<div class="db-zone-row" id="nzr-${i}"><div class="dz-dot" style="background:${color}" onclick="Zones.pickColorNew('${i}',this)"></div><input class="db-input" type="text" placeholder="Nombre" value="${d.name||''}"/><input class="db-input" type="number" placeholder="Precio" value="${d.price||''}" min="0"/><input class="db-input" type="number" placeholder="Capacidad" value="${d.capacity||''}" min="1"/><button class="db-del" onclick="document.getElementById('nzr-${i}').remove()"></button></div>`;}
   function addNewZone(){const l=document.getElementById('new-zone-rows');if(!l)return;const d=document.createElement('div');d.innerHTML=_newZoneRow(_nzc++);l.appendChild(d.firstElementChild);}
+
+  // Versión fija del formulario para organizadores: solo VIP, Oro y General.
+  function _renderCreateForm() {
+    const role = Auth.session().role;
+    if ((role === 'organizer') && !Profile.hasCard()) {
+      return `
+        <div class="db-page-header"><div><h1>Crear Nuevo Evento</h1></div></div>
+        <div class="db-card" style="text-align:center; padding: 40px 20px;">
+          <div style="font-size:3rem; margin-bottom:16px;"><span class="material-symbols-outlined" style="font-size:48px; color:#ca8a04;">account_balance</span></div>
+          <div style="font-weight:700; font-size:1.1rem; color:#1e293b; margin-bottom:8px;">Se requiere cuenta bancaria</div>
+          <div style="font-size:0.88rem; color:#64748b; margin-bottom:20px; max-width:400px; margin-left:auto; margin-right:auto;">
+            Para poder crear y publicar eventos, primero debes registrar tu cuenta bancaria (CLABE) en tu perfil. Los pagos de boletaje se depositarán ahí.
+          </div>
+          <button class="db-btn db-btn-primary" onclick="Profile.open()">
+            <span class="material-symbols-outlined" style="font-size:16px;vertical-align:middle;margin-right:6px">manage_accounts</span>
+            Registrar Cuenta Bancaria
+          </button>
+        </div>`;
+    }
+
+    return `
+      <div class="db-page-header"><div><h1>Crear Nuevo Evento</h1><p>Define información y niveles de boletos.</p></div></div>
+      <div class="db-card"><div class="db-card-head"><div class="db-card-title">Información General</div></div>
+        <div class="db-card-body"><div class="db-grid2">
+          <div class="db-field"><label class="db-label">Nombre del Evento</label><input class="db-input" type="text" placeholder="Ej. Most Wanted Tour"/></div>
+          <div class="db-field"><label class="db-label">Artista / Grupo</label><input class="db-input" type="text" placeholder="Nombre del artista"/></div>
+          <div class="db-field"><label class="db-label">Nombre de Gira <span style="color:#9ca3af;font-weight:400">- opcional</span></label><input class="db-input" type="text" placeholder="Ej. Most Wanted Tour 2026"/></div>
+          <div class="db-field"><label class="db-label">Categoría</label><select class="db-select"><option value="">Selecciona...</option>${CATEGORIES.filter(c=>c!=='Todos').map(c=>`<option>${c}</option>`).join('')}</select></div>
+          <div class="db-field"><label class="db-label">Fecha</label><input class="db-input" type="date"/></div>
+          <div class="db-field"><label class="db-label">Hora</label><input class="db-input" type="time" value="20:00"/></div>
+          <div class="db-field"><label class="db-label">Ciudad</label><input class="db-input" type="text" placeholder="Ciudad"/></div>
+          <div class="db-field"><label class="db-label">Recinto</label><input class="db-input" type="text" placeholder="Ej. Foro Sol"/></div>
+        </div><label class="db-checkbox" style="margin-top:6px"><input type="checkbox"/><span>Solo para adultos (+18)</span></label>
+        </div></div>
+      <div class="db-card"><div class="db-card-head"><div class="db-card-title">Imagen Promocional</div></div>
+        <div class="db-card-body">
+          <div class="db-upload" id="db-upload-area" onclick="document.getElementById('db-file-input').click()" ondragover="event.preventDefault(); this.classList.add('dragover')" ondragleave="this.classList.remove('dragover')" ondrop="Zones.handleDrop(event, this)">
+            <input type="file" id="db-file-input" style="display:none" accept="image/*" onchange="Zones.handleFileSelect(this, document.getElementById('db-upload-area'))"/>
+            <div class="db-upload-icon">${Icons._icon('cloud_upload', 40)}</div>
+            <div class="db-upload-text">Arrastra o haz clic para subir imagen</div>
+            <div class="db-upload-hint">JPG, PNG, WEBP · Máx. 10 MB</div>
+          </div>
+        </div>
+      </div>
+      <div class="db-card"><div class="db-card-head db-create-ticket-head"><div class="db-card-title"><span style="display:inline-flex;margin-right:6px;vertical-align:text-bottom">${Icons.ticket}</span> Niveles de Boletos</div><span class="db-create-ticket-note">Solo se permiten VIP, Oro y General. El tesorero aprueba los precios.</span></div>
+        <div class="db-card-body">
+          <div class="db-tier-list" id="new-zone-rows">${FIXED_TICKET_TIERS.map(_fixedTierRow).join('')}</div>
+        </div></div>
+      <div class="db-card"><div class="db-card-head"><div class="db-card-title">Descripción</div></div>
+        <div class="db-card-body"><textarea class="db-textarea" rows="4" placeholder="Describe el evento..."></textarea></div></div>
+      <div class="db-create-actions">
+        <button class="db-btn db-btn-secondary">Guardar borrador</button>
+        <button class="db-btn db-btn-primary" onclick="alert('Enviado al tesorero para revisión.')">Crear y enviar <span class="material-symbols-outlined" style="font-size: 14px; margin-left:6px; vertical-align: middle;">arrow_forward</span></button>
+      </div>`;
+  }
 
   function handleDrop(e, el) {
     e.preventDefault(); el.classList.remove('dragover');
@@ -508,7 +635,7 @@ window.Zones = (() => {
   /* ══════════════════════════════════════════════════════════
      TESORERO — PAGOS
   ══════════════════════════════════════════════════════════ */
-  function _renderPayouts() {
+  function _renderPayoutsLegacy() {
     const orgs=[
       {email:'eber.higuera@gmail.com',name:'Eber Higuera',events:['Bad Bunny CDMX','Synthwave','Neon Nights'],gross:5334000,paid:false, bank: 'BBVA — CLABE: 012 180 01534007821 9'},
       {email:'other.organizer@gmail.com',name:'Compañía Teatral Elite',events:['El Fantasma de la Ópera'],gross:1130000,paid:true, bank: 'Santander — CLABE: 014 180 00000000930 2'}
@@ -541,7 +668,131 @@ window.Zones = (() => {
   /* ══════════════════════════════════════════════════════════
      TESORERO — REEMBOLSOS
   ══════════════════════════════════════════════════════════ */
-  function _renderRefunds() {
+  function copyBankNumber(value) {
+    const text = (value || '').trim();
+    if (!text) return;
+
+    const fallbackCopy = () => {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      area.style.pointerEvents = 'none';
+      document.body.appendChild(area);
+      area.select();
+
+      try {
+        document.execCommand('copy');
+        _toast('CLABE copiada', 'success');
+      } catch (_err) {
+        _toast('No se pudo copiar la CLABE', 'error');
+      } finally {
+        area.remove();
+      }
+    };
+
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text)
+        .then(() => _toast('CLABE copiada', 'success'))
+        .catch(() => fallbackCopy());
+      return;
+    }
+
+    fallbackCopy();
+  }
+
+  function _renderPayouts() {
+    const orgs = [
+      {
+        email: 'eber.higuera@gmail.com',
+        name: 'Eber Higuera',
+        events: ['Bad Bunny CDMX', 'Synthwave', 'Neon Nights'],
+        gross: 5334000,
+        paid: false,
+        bankName: 'BBVA',
+        clabe: '012 180 01534007821 9'
+      },
+      {
+        email: 'other.organizer@gmail.com',
+        name: 'Compañía Teatral Elite',
+        events: ['El Fantasma de la Ópera'],
+        gross: 1130000,
+        paid: true,
+        bankName: 'Santander',
+        clabe: '014 180 00000000930 2'
+      }
+    ];
+
+    return `<div class="db-page-header">
+        <div>
+          <h1>Pagos a Organizadores</h1>
+          <p>Consulta la información bancaria y distribuye ingresos.</p>
+        </div>
+      </div>
+      ${orgs.map(org => {
+        const fee = Math.round(org.gross * 0.05);
+        const payout = org.gross - fee;
+        return `<div class="db-card db-payout-card">
+          <div class="db-card-head db-payout-head">
+            <div class="db-payout-profile">
+              <div class="db-payout-avatar">${Icons._icon('person', 24)}</div>
+              <div class="db-payout-meta">
+                <div class="db-card-title">${org.name}</div>
+                <div class="db-payout-email">${org.email}</div>
+              </div>
+            </div>
+          </div>
+          <div class="db-card-body">
+            <div class="db-payout-bank">
+              <div class="db-payout-bank-copy">
+                <div class="db-payout-bank-label">Cuenta bancaria registrada</div>
+                <div class="db-payout-bank-name">
+                  <span class="material-symbols-outlined" style="font-size:14px;color:#8B5CF6">account_balance</span>
+                  ${org.bankName}
+                </div>
+                <div class="db-payout-clabe">${org.clabe}</div>
+              </div>
+              <button class="db-btn db-btn-secondary db-payout-copy" onclick="Zones.copyBankNumber('${org.clabe}')">
+                <span class="material-symbols-outlined" style="font-size:16px">content_copy</span>
+                Copiar CLABE
+              </button>
+            </div>
+
+            <div class="db-payout-stats">
+              <div class="db-stat blue">
+                <div class="db-stat-icon">${Icons._icon('account_balance', 22)}</div>
+                <div>
+                  <div class="db-stat-label">Ingresos Brutos</div>
+                  <div class="db-stat-value">$${org.gross.toLocaleString()}</div>
+                </div>
+              </div>
+              <div class="db-stat pink">
+                <div class="db-stat-icon">%</div>
+                <div>
+                  <div class="db-stat-label">Comisión 5%</div>
+                  <div class="db-stat-value db-payout-minus">-$${fee.toLocaleString()}</div>
+                </div>
+              </div>
+              <div class="db-stat green">
+                <div class="db-stat-icon">${Icons._icon('wallet', 22)}</div>
+                <div>
+                  <div class="db-stat-label">A Transferir</div>
+                  <div class="db-stat-value db-payout-plus">$${payout.toLocaleString()}</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="db-payout-events-label">Eventos generadores de saldo:</div>
+            <div class="db-payout-events">
+              ${org.events.map(e => `<span class="db-payout-event"><span>${Icons.ticket}</span>${e}</span>`).join('')}
+            </div>
+          </div>
+        </div>`;
+      }).join('')}`;
+  }
+
+  function _renderRefundsLegacy() {
     const list=[{id:'R-1001',user:'juan.perez@gmail.com',event:'Bad Bunny CDMX',amount:1500,status:'pending'},{id:'R-1002',user:'maria.gomez@outlook.com',event:'Synthwave',amount:2000,status:'approved'},{id:'R-1003',user:'luis.rdz@hotmail.com',event:'Neon Nights',amount:800,status:'pending'}];
     return`<div class="db-page-header"><div><h1>Reembolsos</h1></div><button class="db-btn db-btn-primary" style="font-size:.78rem" onclick="alert('Pagos distribuidos')">Distribuir Pagos</button></div>
       <div class="db-card"><div class="db-table-wrap"><table class="db-table"><thead><tr><th>ID</th><th>Usuario</th><th>Evento</th><th>Monto</th><th>Estado</th><th>Acción</th></tr></thead><tbody>
@@ -552,6 +803,118 @@ window.Zones = (() => {
   /* ══════════════════════════════════════════════════════════
      ADMIN — RESUMEN
   ══════════════════════════════════════════════════════════ */
+  function _syncRefundBadge() {
+    const btn = document.getElementById('tab-refunds');
+    if (!btn) return;
+
+    const pendingCount = _getRefundRequests().filter(refund => refund.status === 'pending').length;
+    let badge = btn.querySelector('.db-nav-badge');
+
+    if (pendingCount > 0) {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'db-nav-badge';
+        btn.appendChild(badge);
+      }
+      badge.textContent = pendingCount;
+      return;
+    }
+
+    badge?.remove();
+  }
+
+  function approveRefundRequest(refundId) {
+    if (typeof Profile === 'undefined' || !Profile.resolveRefund) return;
+    Profile.resolveRefund(refundId, 'approved');
+
+    const panel = document.getElementById('panel-refunds');
+    if (panel) panel.innerHTML = _renderRefunds();
+    _syncRefundBadge();
+    _toast('Reembolso aprobado', 'success');
+  }
+
+  function rejectRefundRequest(refundId) {
+    if (typeof Profile === 'undefined' || !Profile.resolveRefund) return;
+    Profile.resolveRefund(refundId, 'rejected');
+
+    const panel = document.getElementById('panel-refunds');
+    if (panel) panel.innerHTML = _renderRefunds();
+    _syncRefundBadge();
+    _toast('Solicitud rechazada', 'error');
+  }
+
+  function _renderRefunds() {
+    const list = _getRefundRequests();
+    const pending = list.filter(refund => refund.status === 'pending').length;
+    const approved = list.filter(refund => refund.status === 'approved').length;
+    const rejected = list.filter(refund => refund.status === 'rejected').length;
+
+    if (!list.length) {
+      return `<div class="db-page-header"><div><h1>Reembolsos</h1><p>Aquí aparecerán las solicitudes que envíen los clientes.</p></div></div>
+        <div class="db-empty"><div class="db-empty-icon"></div><div class="db-empty-text">Aún no hay solicitudes de reembolso.</div></div>`;
+    }
+
+    return `<div class="db-page-header">
+        <div>
+          <h1>Reembolsos</h1>
+          <p>Solicitudes enviadas por clientes para revisión del tesorero.</p>
+        </div>
+        <span class="db-badge pending">${pending} pendiente${pending === 1 ? '' : 's'}</span>
+      </div>
+      <div class="db-stats">
+        <div class="db-stat pink"><div class="db-stat-icon">${Icons._icon('reply', 22)}</div><div><div class="db-stat-label">Pendientes</div><div class="db-stat-value">${pending}</div></div></div>
+        <div class="db-stat green"><div class="db-stat-icon">${Icons._icon('check_circle', 22)}</div><div><div class="db-stat-label">Aprobados</div><div class="db-stat-value">${approved}</div></div></div>
+        <div class="db-stat purple"><div class="db-stat-icon">${Icons._icon('cancel', 22)}</div><div><div class="db-stat-label">Rechazados</div><div class="db-stat-value">${rejected}</div></div></div>
+      </div>
+      <div class="db-card">
+        <div class="db-table-wrap">
+          <table class="db-table">
+            <thead>
+              <tr>
+                <th>Solicitud</th>
+                <th>Cliente</th>
+                <th>Evento</th>
+                <th>Monto</th>
+                <th>Motivo</th>
+                <th>Estado</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${list.map(refund => `
+                <tr>
+                  <td>
+                    <code style="font-size:.75rem;color:#8A2BE2">${refund.id}</code>
+                    <div style="font-size:.7rem;color:#94a3b8;margin-top:4px">${new Date(refund.requestedAt).toLocaleDateString('es-ES')}</div>
+                  </td>
+                  <td>
+                    <div style="font-weight:700;color:#0f172a;font-size:.8rem">${refund.userName}</div>
+                    <div style="font-size:.72rem;color:#64748b;margin-top:3px">${refund.userEmail}</div>
+                  </td>
+                  <td>
+                    <div style="font-weight:700;color:#0f172a;font-size:.8rem">${refund.eventTitle}</div>
+                    <div style="font-size:.72rem;color:#64748b;margin-top:3px">Zona: ${String(refund.zone || '').toUpperCase()}</div>
+                  </td>
+                  <td style="font-weight:700">$${Number(refund.amount || 0).toLocaleString()}</td>
+                  <td style="min-width:220px">
+                    <div style="font-size:.78rem;line-height:1.45;color:#334155">${refund.reason}</div>
+                  </td>
+                  <td><span class="db-badge ${refund.status === 'approved' ? 'approved' : refund.status === 'rejected' ? 'rejected' : 'pending'}">${refund.status === 'approved' ? 'Aprobado' : refund.status === 'rejected' ? 'Rechazado' : 'Pendiente'}</span></td>
+                  <td>
+                    ${refund.status === 'pending'
+                      ? `<div style="display:flex;gap:8px;flex-wrap:wrap">
+                           <button class="db-btn db-btn-success" style="font-size:.72rem;padding:6px 10px" onclick="Zones.approveRefundRequest('${refund.id}')">Aprobar</button>
+                           <button class="db-btn db-btn-danger" style="font-size:.72rem;padding:6px 10px" onclick="Zones.rejectRefundRequest('${refund.id}')">Rechazar</button>
+                         </div>`
+                      : '—'}
+                  </td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
   function _renderOverview() {
     const p=getPending();
     return`<div class="db-page-header"><div><h1>Centro de Control</h1><p>Supervisión global.</p></div><div style="background:rgba(138,43,226,.08);color:#8A2BE2;padding:6px 14px;border-radius:9px;font-size:.78rem;font-weight:700;border:1px solid rgba(138,43,226,.15)">Operativa</div></div>
@@ -582,6 +945,7 @@ window.Zones = (() => {
     toggleExpand, addZone, deleteZone, setField, submitZones,
     pickColor, pickColorNew, addNewZone,
     overridePrice, approveEvent, rejectEvent,
-    handleDrop, handleFileSelect, promoteToCarousel
+    handleDrop, handleFileSelect, promoteToCarousel, copyBankNumber,
+    approveRefundRequest, rejectRefundRequest
   };
 })();
