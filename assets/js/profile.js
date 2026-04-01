@@ -8,10 +8,19 @@ window.Profile = (() => {
 
   // ─── State ────────────────────────────────────────────────
   const STORAGE_KEYS = {
+    tickets: 'ticketazo.profile.tickets.v2',
+    refunds: 'ticketazo.profile.refunds.v3',
+    organizerCard: 'ticketazo.profile.card.v2',
+  };
+
+  const LEGACY_STORAGE_KEYS = {
     tickets: 'ticketazo.profile.tickets.v1',
     refunds: 'ticketazo.profile.refunds.v1',
+    scopedRefunds: 'ticketazo.profile.refunds.v2',
     organizerCard: 'ticketazo.profile.card.v1',
   };
+
+  const SCOPED_STORAGE_NAMES = ['tickets', 'organizerCard'];
 
   const INITIAL_TICKETS = [
     { id: 'T-8821', eventId: 'e1', zone: 'vip',   purchaseDate: '2026-04-01', qrCode: 'TKZ-E1-VIP-8821-X9K2' },
@@ -24,6 +33,7 @@ window.Profile = (() => {
     tickets: [],            // Boletos comprados
     refunds: [],            // Solicitudes de reembolso del usuario
     registeredCard: null,   // { last4, brand, holder } | null
+    scope: '',
   };
 
   function _loadJSON(key, fallback) {
@@ -43,14 +53,104 @@ window.Profile = (() => {
     }
   }
 
-  function _persistTickets() { _saveJSON(STORAGE_KEYS.tickets, state.tickets); }
-  function _persistRefunds() { _saveJSON(STORAGE_KEYS.refunds, state.refunds); }
-  function _persistCard()    { _saveJSON(STORAGE_KEYS.organizerCard, state.registeredCard); }
+  function _currentUserScope() {
+    const session = typeof Auth !== 'undefined' && Auth.session ? Auth.session() : null;
+    if (session?.id) return `user:${session.id}`;
+    if (session?.email) return `email:${String(session.email).trim().toLowerCase()}`;
+    return 'guest';
+  }
 
-  function _hydrateState() {
-    state.tickets = _loadJSON(STORAGE_KEYS.tickets, INITIAL_TICKETS.map(ticket => ({ ...ticket })));
-    state.refunds = _loadJSON(STORAGE_KEYS.refunds, []);
-    state.registeredCard = _loadJSON(STORAGE_KEYS.organizerCard, null);
+  function _scopedKey(baseKey, scope = _currentUserScope()) {
+    return `${baseKey}:${scope}`;
+  }
+
+  function _migrateLegacyData(scope) {
+    if (!scope || scope === 'guest') return;
+
+    SCOPED_STORAGE_NAMES.forEach(name => {
+      const baseKey = STORAGE_KEYS[name];
+      const scopedKey = _scopedKey(baseKey, scope);
+      const legacyKey = LEGACY_STORAGE_KEYS[name];
+      if (!legacyKey) return;
+
+      const hasScoped = localStorage.getItem(scopedKey);
+      const legacyRaw = localStorage.getItem(legacyKey);
+      if (hasScoped || !legacyRaw) return;
+
+      localStorage.setItem(scopedKey, legacyRaw);
+      localStorage.removeItem(legacyKey);
+    });
+
+    _migrateLegacyRefunds(scope);
+  }
+
+  function _persistTickets() { _saveJSON(_scopedKey(STORAGE_KEYS.tickets, state.scope), state.tickets); }
+  function _persistCard()    { _saveJSON(_scopedKey(STORAGE_KEYS.organizerCard, state.scope), state.registeredCard); }
+
+  function _loadRefundQueue() {
+    return _loadJSON(STORAGE_KEYS.refunds, []);
+  }
+
+  function _saveRefundQueue(queue) {
+    _saveJSON(STORAGE_KEYS.refunds, queue);
+  }
+
+  function _refundBelongsToScope(refund, scope) {
+    return (refund?.userScope || '') === scope;
+  }
+
+  function _normalizeRefund(refund, scope) {
+    return {
+      ...refund,
+      userScope: refund?.userScope || scope,
+    };
+  }
+
+  function _migrateLegacyRefunds(scope) {
+    const sources = [
+      LEGACY_STORAGE_KEYS.refunds,
+      _scopedKey(LEGACY_STORAGE_KEYS.scopedRefunds, scope),
+    ];
+
+    const queue = _loadRefundQueue();
+    const knownIds = new Set(queue.map(refund => refund.id));
+    let dirty = false;
+
+    sources.forEach(key => {
+      const items = _loadJSON(key, null);
+      if (!Array.isArray(items) || !items.length) return;
+
+      items.forEach(item => {
+        const normalized = _normalizeRefund(item, scope);
+        if (knownIds.has(normalized.id)) return;
+        knownIds.add(normalized.id);
+        queue.push(normalized);
+        dirty = true;
+      });
+
+      localStorage.removeItem(key);
+    });
+
+    if (dirty) _saveRefundQueue(queue);
+  }
+
+  function _persistRefunds() {
+    const keep = _loadRefundQueue().filter(refund => !_refundBelongsToScope(refund, state.scope));
+    const currentScopeRefunds = state.refunds.map(refund => _normalizeRefund(refund, state.scope));
+    _saveRefundQueue([...currentScopeRefunds, ...keep]);
+  }
+
+  function _hydrateState(force = false) {
+    const scope = _currentUserScope();
+    if (!force && state.scope === scope) return;
+
+    _migrateLegacyData(scope);
+    state.scope = scope;
+    state.tickets = _loadJSON(_scopedKey(STORAGE_KEYS.tickets, scope), INITIAL_TICKETS.map(ticket => ({ ...ticket })));
+    state.refunds = _loadRefundQueue()
+      .filter(refund => _refundBelongsToScope(refund, scope))
+      .map(refund => ({ ...refund }));
+    state.registeredCard = _loadJSON(_scopedKey(STORAGE_KEYS.organizerCard, scope), null);
   }
 
   function _findEvent(eventId) {
@@ -75,9 +175,10 @@ window.Profile = (() => {
     return state.refunds.find(refund => refund.ticketId === ticketId) || null;
   }
 
-  _hydrateState();
+  _hydrateState(true);
 
   function addTickets(eventId, zone, qty) {
+    _hydrateState();
     for (let i = 0; i < qty; i++) {
       const id = 'T-' + Math.floor(1000 + Math.random() * 9000);
       state.tickets.unshift({
@@ -125,12 +226,14 @@ window.Profile = (() => {
   // ─── Navigation ───────────────────────────────────────────
   function open() {
     if (!Auth.isLoggedIn()) { Auth.openModal(); return; }
+    _hydrateState();
     render();
     App.navigate('profile');
   }
 
   // ─── Main Render ──────────────────────────────────────────
   function render() {
+    _hydrateState();
     const sess = Auth.session();
     const el   = document.getElementById('page-profile');
     if (!el) return;
@@ -178,7 +281,7 @@ window.Profile = (() => {
 
         ${isOrganizer ? renderCardSection() : ''}
         ${renderFavorites()}
-        ${!isOrganizer ? renderTickets(sess) : ''}
+        ${renderTickets(sess)}
         ${renderRecentReviews(sess.name)}
       </div>`;
 
@@ -249,6 +352,7 @@ window.Profile = (() => {
   }
 
   function saveCard() {
+    _hydrateState();
     const num  = document.getElementById('pc-num')?.value.replace(/\s/g, '');
     const name = document.getElementById('pc-name')?.value.trim();
     const bank = document.getElementById('pc-bank')?.value.trim();
@@ -269,13 +373,14 @@ window.Profile = (() => {
   }
 
   function removeCard() {
+    _hydrateState();
     if (!confirm('¿Estás seguro de que deseas eliminar esta tarjeta?')) return;
     state.registeredCard = null;
     _persistCard();
     render();
   }
 
-  function hasCard() { return !!state.registeredCard; }
+  function hasCard() { _hydrateState(); return !!state.registeredCard; }
 
   function fmtCard(el) {
     el.value = el.value.replace(/\D/g, '').slice(0, 18).replace(/(.{4})(?=\d)/g, '$1 ').trim();
@@ -325,6 +430,7 @@ window.Profile = (() => {
 
   // ─── Tickets ──────────────────────────────────────────────
   function renderTickets(sess) {
+    _hydrateState();
     const tickets = Auth.session() ? state.tickets : [];
 
     const content = tickets.length
@@ -415,6 +521,7 @@ window.Profile = (() => {
   }
 
   function requestRefund(ticketId) {
+    _hydrateState();
     if (!Auth.isLoggedIn()) {
       Auth.openModal();
       return;
@@ -455,6 +562,7 @@ window.Profile = (() => {
       amount: _getTicketPrice(ticket),
       userName: session.name || 'Cliente',
       userEmail: session.email || 'cliente@ticketazo.mx',
+      userScope: state.scope,
       reason: cleanReason,
       requestedAt: now,
       updatedAt: now,
@@ -472,12 +580,17 @@ window.Profile = (() => {
   }
 
   function resolveRefund(refundId, status) {
-    const refund = state.refunds.find(item => item.id === refundId);
+    _hydrateState();
+    const queue = _loadRefundQueue();
+    const refund = queue.find(item => item.id === refundId);
     if (!refund) return;
 
     refund.status = status;
     refund.updatedAt = new Date().toISOString();
-    _persistRefunds();
+    _saveRefundQueue(queue);
+    state.refunds = queue
+      .filter(item => _refundBelongsToScope(item, state.scope))
+      .map(item => ({ ...item }));
 
     if (document.getElementById('page-profile')?.classList.contains('active')) {
       render();
@@ -485,6 +598,7 @@ window.Profile = (() => {
   }
 
   function toggleQR(ticketId) {
+    _hydrateState();
     const section = document.getElementById(`qr-${ticketId}`);
     const btn     = section?.previousElementSibling?.querySelector('.ticket-qr-toggle');
     if (!section) return;
@@ -596,6 +710,7 @@ window.Profile = (() => {
   }
 
   function generateQRCodes() {
+    _hydrateState();
     state.tickets.forEach(t => {
       const canvas = document.getElementById(`qrc-${t.id}`);
       if (canvas && !canvas.dataset.generated && document.getElementById(`qr-${t.id}`)?.classList.contains('open')) {
@@ -633,14 +748,21 @@ window.Profile = (() => {
   }
 
     // ─── Public API ───────────────────────────────────────────
+  function onSessionChanged() {
+    _hydrateState(true);
+  }
+
   return {
-    open, render,
+    open, render, onSessionChanged,
     toggleEmailEdit, saveEmail,
     toggleLike, isLiked,
     toggleQR, requestRefund, resolveRefund,
     saveCard, removeCard, hasCard,
     fmtCard, fmtExp, addTickets,
-    getRefundRequests: () => state.refunds,
+    getRefundRequests: () => {
+      _hydrateState();
+      return _loadRefundQueue().map(refund => ({ ...refund }));
+    },
     getState: () => state,
   };
 })();

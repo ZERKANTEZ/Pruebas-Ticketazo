@@ -4,7 +4,7 @@
  */
 const Auth = (() => {
   // ── Estado interno ────────────────────────────────────────────────────────
-  let _session = { name: '', role: '', email: '' };
+  let _session = { id: '', name: '', role: '', email: '' };
   let _sbReady  = false;
   let _sb       = null;
   let _applying = false;
@@ -109,7 +109,8 @@ const Auth = (() => {
 
     try {
       if (!sbSession?.user) {
-        _session = { name: '', role: '', email: '' };
+        _session = { id: '', name: '', role: '', email: '' };
+        if (typeof Profile !== 'undefined' && Profile.onSessionChanged) Profile.onSessionChanged(_session);
         if (typeof App !== 'undefined') App.updateNav();
         if (typeof Zones !== 'undefined') Zones.init();
         // No cerrar el modal aquí: durante el arranque inicial de Supabase
@@ -124,7 +125,8 @@ const Auth = (() => {
       const confirmed = sbSession.user.email_confirmed_at;
       if (!confirmed) {
         await _sb.auth.signOut();
-        _session = { name: '', role: '', email: '' };
+        _session = { id: '', name: '', role: '', email: '' };
+        if (typeof Profile !== 'undefined' && Profile.onSessionChanged) Profile.onSessionChanged(_session);
         if (isExplicitLogin) {
           _goView('login');
           setTimeout(() => _showErr('login-err', 'MANDATORIO: Debes confirmar tu correo electrónico antes de entrar.'), 100);
@@ -136,7 +138,8 @@ const Auth = (() => {
       const role = await _fetchRole(sbSession.user);
       const name = sbSession.user.user_metadata?.full_name || sbSession.user.email?.split('@')[0] || 'Usuario';
       
-      _session = { name, role, email: sbSession.user.email };
+      _session = { id: sbSession.user.id || '', name, role, email: sbSession.user.email };
+      if (typeof Profile !== 'undefined' && Profile.onSessionChanged) Profile.onSessionChanged(_session);
       
       closeModal();
       if (typeof App !== 'undefined') App.updateNav();
@@ -237,7 +240,7 @@ const Auth = (() => {
     } catch(err) {
       console.warn('[Auth] Ignorando error al cerrar sesión:', err);
     }
-    _session = { name: '', role: '', email: '' };
+    _session = { id: '', name: '', role: '', email: '' };
     window.location.reload();
   }
 

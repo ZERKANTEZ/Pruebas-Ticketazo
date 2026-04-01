@@ -418,13 +418,6 @@ const Pages = (() => {
   // ─────────────────────────────────────────
   function handleBuy(id) {
     if (!Auth.isLoggedIn()) { Auth.openModal(); return; }
-    // Organizers must have a registered card
-    if (Auth.session().role === 'organizer' && !Profile.hasCard()) {
-      if (confirm('Como organizador necesitas tener una tarjeta registrada.\n\n¿Deseas ir a tu perfil para agregarla?')) {
-        Profile.open();
-      }
-      return;
-    }
     const ev = EVENTS.find(e => e.id === id);
     Checkout.open(id);
   }

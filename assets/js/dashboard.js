@@ -400,7 +400,7 @@ window.Zones = (() => {
   function pickColor(eventId, idx, dotEl) {
     _showColorPicker(dotEl, c=>{setField(eventId,idx,'color',c);dotEl.style.background=c;});
   }
-  function pickColorNew(i, dotEl) { _showColorPicker(dotEl, c=>{dotEl.style.background=c;}); }
+  function pickColorNewLegacy(i, dotEl) { _showColorPicker(dotEl, c=>{dotEl.style.background=c;}); }
   function _showColorPicker(dotEl, onPick) {
     document.getElementById('_cp')?.remove();
     const pop=document.createElement('div');pop.className='dz-color-picker';pop.id='_cp';
@@ -440,7 +440,7 @@ window.Zones = (() => {
   /* ══════════════════════════════════════════════════════════
      ORGANIZADOR — CREAR EVENTO
   ══════════════════════════════════════════════════════════ */
-  function _renderCreateForm() {
+  function _renderCreateFormLegacy() {
     // Punto 3: verificar datos bancarios antes de permitir crear un evento
     const role = Auth.session().role;
     if ((role === 'organizer') && !Profile.hasCard()) {
@@ -484,7 +484,7 @@ window.Zones = (() => {
       </div>
       <div class="db-card"><div class="db-card-head"><div class="db-card-title"><span style="display:inline-flex;margin-right:6px;vertical-align:text-bottom">${Icons.ticket}</span> Niveles de Boletos</div><span style="font-size:.73rem;color:#64748b">El tesorero aprueba los precios.</span></div>
         <div class="db-card-body">
-          <div class="db-zone-rows" id="new-zone-rows">${_newZoneRow(0,{name:'General',price:500,color:COLORS[1],capacity:1000})}</div>
+          <div class="db-zone-rows" id="new-zone-rows">${_newZoneRowLegacy(0,{name:'General',price:500,color:COLORS[1],capacity:1000})}</div>
           <button class="db-add-zone" onclick="Zones.addNewZone()">&#xff0b; Agregar nivel</button>
         </div></div>
       <div class="db-card"><div class="db-card-head"><div class="db-card-title">Descripción</div></div>
@@ -495,11 +495,11 @@ window.Zones = (() => {
       </div>`;
   }
   let _nzc=1;
-  function _newZoneRow(i,d){d=d||{};const color=d.color||COLORS[i%COLORS.length];return`<div class="db-zone-row" id="nzr-${i}"><div class="dz-dot" style="background:${color}" onclick="Zones.pickColorNew('${i}',this)"></div><input class="db-input" type="text" placeholder="Nombre" value="${d.name||''}"/><input class="db-input" type="number" placeholder="Precio" value="${d.price||''}" min="0"/><input class="db-input" type="number" placeholder="Capacidad" value="${d.capacity||''}" min="1"/><button class="db-del" onclick="document.getElementById('nzr-${i}').remove()"></button></div>`;}
-  function addNewZone(){const l=document.getElementById('new-zone-rows');if(!l)return;const d=document.createElement('div');d.innerHTML=_newZoneRow(_nzc++);l.appendChild(d.firstElementChild);}
+  function _newZoneRowLegacy(i,d){d=d||{};const color=d.color||COLORS[i%COLORS.length];return`<div class="db-zone-row" id="nzr-${i}"><div class="dz-dot" style="background:${color}" onclick="Zones.pickColorNewLegacy('${i}',this)"></div><input class="db-input" type="text" placeholder="Nombre" value="${d.name||''}"/><input class="db-input" type="number" placeholder="Precio" value="${d.price||''}" min="0"/><input class="db-input" type="number" placeholder="Capacidad" value="${d.capacity||''}" min="1"/><button class="db-del" onclick="document.getElementById('nzr-${i}').remove()"></button></div>`;}
+  function addNewZoneLegacy(){const l=document.getElementById('new-zone-rows');if(!l)return;const d=document.createElement('div');d.innerHTML=_newZoneRowLegacy(_nzc++);l.appendChild(d.firstElementChild);}
 
   // Versión fija del formulario para organizadores: solo VIP, Oro y General.
-  function _renderCreateForm() {
+  function _renderCreateFormInline() {
     const role = Auth.session().role;
     if ((role === 'organizer') && !Profile.hasCard()) {
       return `
@@ -702,7 +702,7 @@ window.Zones = (() => {
     fallbackCopy();
   }
 
-  function _renderPayouts() {
+  function _renderPayoutsInline() {
     const orgs = [
       {
         email: 'eber.higuera@gmail.com',
@@ -843,7 +843,7 @@ window.Zones = (() => {
     _toast('Solicitud rechazada', 'error');
   }
 
-  function _renderRefunds() {
+  function _renderRefundsInline() {
     const list = _getRefundRequests();
     const pending = list.filter(refund => refund.status === 'pending').length;
     const approved = list.filter(refund => refund.status === 'approved').length;
@@ -915,7 +915,7 @@ window.Zones = (() => {
       </div>`;
   }
 
-  function _renderOverview() {
+  function _renderOverviewInline() {
     const p=getPending();
     return`<div class="db-page-header"><div><h1>Centro de Control</h1><p>Supervisión global.</p></div><div style="background:rgba(138,43,226,.08);color:#8A2BE2;padding:6px 14px;border-radius:9px;font-size:.78rem;font-weight:700;border:1px solid rgba(138,43,226,.15)">Operativa</div></div>
       <div class="db-stats">
@@ -929,6 +929,107 @@ window.Zones = (() => {
   }
 
   /* ── Utilidades ── */
+  function _renderCreateForm() {
+    const render = window.DashboardViews?.renderCreateForm;
+    if (!render) return _renderCreateFormInline();
+
+    return render({
+      role: Auth.session().role,
+      hasCard: Profile.hasCard(),
+      categories: CATEGORIES.filter(category => category !== 'Todos'),
+      uploadIcon: Icons._icon('cloud_upload', 40),
+      ticketIcon: Icons.ticket,
+      fixedTicketTiers: FIXED_TICKET_TIERS,
+    });
+  }
+
+  function _renderPayouts() {
+    const render = window.DashboardViews?.renderPayouts;
+    if (!render) return _renderPayoutsInline();
+
+    const rows = [
+      {
+        email: 'eber.higuera@gmail.com',
+        name: 'Eber Higuera',
+        events: ['Bad Bunny CDMX', 'Synthwave', 'Neon Nights'],
+        gross: 5334000,
+        bankName: 'BBVA',
+        clabe: '012 180 01534007821 9',
+      },
+      {
+        email: 'other.organizer@gmail.com',
+        name: 'Compañía Teatral Elite',
+        events: ['El Fantasma de la Ópera'],
+        gross: 1130000,
+        bankName: 'Santander',
+        clabe: '014 180 00000000930 2',
+      },
+    ].map(org => {
+      const fee = Math.round(org.gross * 0.05);
+      const payout = org.gross - fee;
+      return {
+        ...org,
+        grossLabel: `$${org.gross.toLocaleString()}`,
+        feeLabel: `-$${fee.toLocaleString()}`,
+        payoutLabel: `$${payout.toLocaleString()}`,
+      };
+    });
+
+    return render({
+      rows,
+      personIcon: Icons._icon('person', 24),
+      bankIcon: Icons._icon('account_balance', 22),
+      walletIcon: Icons._icon('wallet', 22),
+      ticketIcon: Icons.ticket,
+    });
+  }
+
+  function _renderRefunds() {
+    const render = window.DashboardViews?.renderRefunds;
+    if (!render) return _renderRefundsInline();
+
+    const rows = _getRefundRequests().map(refund => ({
+      ...refund,
+      dateLabel: new Date(refund.requestedAt).toLocaleDateString('es-ES'),
+      zoneLabel: String(refund.zone || '').toUpperCase(),
+      amountLabel: `$${Number(refund.amount || 0).toLocaleString()}`,
+      statusClass: refund.status === 'approved' ? 'approved' : refund.status === 'rejected' ? 'rejected' : 'pending',
+      statusLabel: refund.status === 'approved' ? 'Aprobado' : refund.status === 'rejected' ? 'Rechazado' : 'Pendiente',
+      actionHtml: refund.status === 'pending'
+        ? `<div style="display:flex;gap:8px;flex-wrap:wrap">
+             <button class="db-btn db-btn-success" style="font-size:.72rem;padding:6px 10px" onclick="Zones.approveRefundRequest('${refund.id}')">Aprobar</button>
+             <button class="db-btn db-btn-danger" style="font-size:.72rem;padding:6px 10px" onclick="Zones.rejectRefundRequest('${refund.id}')">Rechazar</button>
+           </div>`
+        : '—',
+    }));
+
+    const summary = {
+      pending: rows.filter(refund => refund.status === 'pending').length,
+      approved: rows.filter(refund => refund.status === 'approved').length,
+      rejected: rows.filter(refund => refund.status === 'rejected').length,
+    };
+
+    return render({
+      rows,
+      summary,
+      replyIcon: Icons._icon('reply', 22),
+      approvedIcon: Icons._icon('check_circle', 22),
+      rejectedIcon: Icons._icon('cancel', 22),
+    });
+  }
+
+  function _renderOverview() {
+    const render = window.DashboardViews?.renderOverview;
+    if (!render) return _renderOverviewInline();
+
+    return render({
+      pendingEvents: getPending(),
+      groupIcon: Icons._icon('group', 24),
+      notificationIcon: Icons._icon('notifications', 24),
+      pendingActionsIcon: Icons._icon('pending_actions', 24),
+    });
+  }
+
   function _fmt(d){return new Date(d).toLocaleDateString('es-ES',{day:'numeric',month:'short',year:'numeric'});}
   function _toast(msg,type){
     let t=document.getElementById('_tz');
@@ -943,7 +1044,9 @@ window.Zones = (() => {
     getZones, getStatus, getMinPrice, getPending,
     openSidebar, closeSidebar, switchTab,
     toggleExpand, addZone, deleteZone, setField, submitZones,
-    pickColor, pickColorNew, addNewZone,
+    pickColor,
+    pickColorNew: pickColorNewLegacy,
+    addNewZone: addNewZoneLegacy,
     overridePrice, approveEvent, rejectEvent,
     handleDrop, handleFileSelect, promoteToCarousel, copyBankNumber,
     approveRefundRequest, rejectRefundRequest
