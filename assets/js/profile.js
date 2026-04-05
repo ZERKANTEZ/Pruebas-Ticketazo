@@ -393,10 +393,34 @@ window.Profile = (() => {
     return created;
   }
 
+  async function _loadFavoritesFromDb() {
+    const session = typeof Auth !== 'undefined' && Auth.session ? Auth.session() : null;
+    if (!session?.dbUserId || typeof DB === 'undefined' || !DB.fetchFavorites) return;
+    try {
+      const likedIds = await DB.fetchFavorites(session.dbUserId);
+      state.liked = new Set(likedIds);
+      // Refresh like buttons on screen
+      document.querySelectorAll('.like-btn').forEach(btn => {
+        const id = btn.dataset.id;
+        if (!id) return;
+        const liked = state.liked.has(id);
+        btn.classList.toggle('liked', liked);
+        btn.innerHTML = liked ? Icons.heart : Icons.heartOutline;
+      });
+    } catch (err) {
+      console.warn('[Profile] No se pudieron cargar los favoritos:', err);
+    }
+  }
+
   function toggleLike(id, _el) {
+    if (!Auth.isLoggedIn()) {
+      Auth.openModal();
+      return;
+    }
     const liked = state.liked.has(id);
     const nextState = !liked;
 
+    // Optimistic UI update
     if (liked) state.liked.delete(id);
     else state.liked.add(id);
 
@@ -406,13 +430,18 @@ window.Profile = (() => {
       button.innerHTML = nextState ? Icons.heart : Icons.heartOutline;
     });
 
-    if (!Auth.isLoggedIn()) {
-      state.liked.delete(id);
-      document.querySelectorAll(`.like-btn[data-id="${id}"]`).forEach(button => {
-        button.classList.remove('liked');
-        button.innerHTML = Icons.heartOutline;
+    // Persist to DB
+    const session = typeof Auth !== 'undefined' && Auth.session ? Auth.session() : null;
+    if (session?.dbUserId && typeof DB !== 'undefined' && DB.toggleFavorite) {
+      DB.toggleFavorite(session.dbUserId, id).catch(err => {
+        // Rollback on error
+        console.warn('[Profile] Error al toggleFavorite:', err);
+        if (nextState) state.liked.delete(id); else state.liked.add(id);
+        document.querySelectorAll(`.like-btn[data-id="${id}"]`).forEach(button => {
+          button.classList.toggle('liked', !nextState);
+          button.innerHTML = !nextState ? Icons.heart : Icons.heartOutline;
+        });
       });
-      Auth.openModal();
     }
   }
 
@@ -427,6 +456,7 @@ window.Profile = (() => {
     }
     _hydrateState();
     void _loadTicketsFromDb();
+    void _loadFavoritesFromDb();
     render();
     App.navigate('profile');
   }
@@ -980,6 +1010,7 @@ window.Profile = (() => {
     _hydrateState(true);
     if (_useDbTickets()) {
       void _loadTicketsFromDb(true);
+      void _loadFavoritesFromDb();
     }
   }
 

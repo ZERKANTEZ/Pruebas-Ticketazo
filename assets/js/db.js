@@ -13,6 +13,8 @@ window.DB = (() => {
       events: 'evento',
       payments: 'pago',
       users: 'usuario',
+      carousel: 'carrusel_hero',
+      favorites: 'favorito',
     },
     legacyPasswordPlaceholder: 'SUPABASE_AUTH_MANAGED',
     eventMapStorageKey: 'ticketazo.db.event-map.v1',
@@ -242,6 +244,7 @@ window.DB = (() => {
       fecha: localEvent.date,
       ubicacion: location,
       capacidad: Number(localEvent.ticketCapacity || 0) || 1,
+      precio: Number(localEvent.ticketPrice || 0),
       imagen_url: localEvent.image || null,
     };
 
@@ -272,6 +275,7 @@ window.DB = (() => {
       fecha: localEvent.date,
       ubicacion: location,
       capacidad: Number(localEvent.ticketCapacity || 0) || 1,
+      precio: Number(localEvent.ticketPrice || 0),
       imagen_url: localEvent.image || null,
     };
 
@@ -296,6 +300,31 @@ window.DB = (() => {
 
     if (error) throw error;
     return knownId;
+  }
+
+  async function deleteEventRecord(localEventId) {
+    const sb = client();
+    if (!sb || !localEventId) return false;
+
+    const map = _getEventMap();
+    const knownId = map[localEventId] ? Number(map[localEventId]) : null;
+    
+    if (knownId) {
+      const { error } = await sb
+        .from(CONFIG.tables.events)
+        .delete()
+        .eq('id', knownId);
+        
+      if (error) {
+        console.warn('Error deleting event from DB', error);
+        return false;
+      }
+      
+      delete map[localEventId];
+      _persistEventMap();
+      return true;
+    }
+    return false;
   }
 
   async function _findDbEventIdForLocalEvent(localEvent) {
@@ -403,7 +432,7 @@ window.DB = (() => {
 
     const { data: dbEvents, error } = await sb
       .from(CONFIG.tables.events)
-      .select('id,titulo,fecha,ubicacion,capacidad,imagen_url,id_administrador');
+      .select('id,titulo,fecha,ubicacion,capacidad,precio,imagen_url,id_administrador');
 
     if (error) {
       console.warn('Error fetching all events:', error);
@@ -417,6 +446,24 @@ window.DB = (() => {
         .select('id,email');
       if (admins) {
         adminsMap = Object.fromEntries(admins.map(a => [a.id, a.email]));
+      }
+    }
+
+    // Fetch price per event from boleto table
+    let priceByEventId = {};
+    if (dbEvents?.length) {
+      const dbEventIds = dbEvents.map(e => e.id);
+      const { data: boletos } = await sb
+        .from(CONFIG.tables.tickets)
+        .select('id_evento,precio')
+        .in('id_evento', dbEventIds)
+        .gt('precio', 0);
+      if (boletos?.length) {
+        boletos.forEach(b => {
+          if (b.precio > 0 && !priceByEventId[b.id_evento]) {
+            priceByEventId[b.id_evento] = Number(b.precio);
+          }
+        });
       }
     }
 
@@ -444,6 +491,8 @@ window.DB = (() => {
       }
 
       const { venue, city } = _splitLocation(dbEvent.ubicacion);
+      // Primary price = evento.precio; fallback = first boleto precio for legacy events
+      const derivedPrice = Number(dbEvent.precio || 0) || (priceByEventId[dbEvent.id] || 0);
       return {
         id: localId,
         title: dbEvent.titulo || 'Evento Sin Nombre',
@@ -452,7 +501,7 @@ window.DB = (() => {
         venue: venue || 'Por Definir',
         city: city || 'Ciudad',
         ticketCapacity: Number(dbEvent.capacidad || 100),
-        ticketPrice: 0,
+        ticketPrice: derivedPrice,
         image: dbEvent.imagen_url || 'assets/img/logo.png',
         organizerId: adminsMap[dbEvent.id_administrador] || '',
         status: 'active',
@@ -628,6 +677,134 @@ window.DB = (() => {
     });
   }
 
+  // ── Carrusel Hero ─────────────────────────────────────────────────────────
+
+  async function fetchHeroSlides() {
+    const sb = client();
+    if (!sb) return [];
+    const { data, error } = await sb
+      .from(CONFIG.tables.carousel)
+      .select('id,id_evento,titulo,subtitulo,cta,orden')
+      .order('orden', { ascending: true });
+    if (error) { console.warn('[DB] fetchHeroSlides:', error); return []; }
+
+    const map = _getEventMap();
+    const dbToLocal = Object.fromEntries(Object.entries(map).map(([k, v]) => [Number(v), k]));
+
+    return (data || []).map(row => {
+      const localId = dbToLocal[row.id_evento] || `evt-db-${row.id_evento}`;
+      return {
+        dbId: row.id,
+        eventId: localId,
+        title: row.titulo || '',
+        sub: row.subtitulo || '',
+        cta: row.cta || '',
+        orden: row.orden || 0,
+      };
+    });
+  }
+
+  async function saveHeroSlide({ eventId, title, sub, cta, orden = 0 }) {
+    const sb = client();
+    if (!sb || !eventId) return null;
+
+    // Resolve DB event id
+    const map = _getEventMap();
+    const dbEventId = map[eventId] ? Number(map[eventId]) : null;
+    if (!dbEventId) { console.warn('[DB] saveHeroSlide: evento no encontrado:', eventId); return null; }
+
+    // Upsert: if a row for this event already exists, update it
+    const { data: existing } = await sb
+      .from(CONFIG.tables.carousel)
+      .select('id')
+      .eq('id_evento', dbEventId)
+      .maybeSingle();
+
+    if (existing?.id) {
+      const { error } = await sb
+        .from(CONFIG.tables.carousel)
+        .update({ titulo: title, subtitulo: sub, cta, orden })
+        .eq('id', existing.id);
+      if (error) throw error;
+      return existing.id;
+    }
+
+    const { data, error } = await sb
+      .from(CONFIG.tables.carousel)
+      .insert({ id_evento: dbEventId, titulo: title, subtitulo: sub, cta, orden })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return data.id;
+  }
+
+  async function deleteHeroSlide(eventId) {
+    const sb = client();
+    if (!sb || !eventId) return false;
+    const map = _getEventMap();
+    const dbEventId = map[eventId] ? Number(map[eventId]) : null;
+    if (!dbEventId) return false;
+    const { error } = await sb
+      .from(CONFIG.tables.carousel)
+      .delete()
+      .eq('id_evento', dbEventId);
+    if (error) { console.warn('[DB] deleteHeroSlide:', error); return false; }
+    return true;
+  }
+
+  // ── Favoritos ──────────────────────────────────────────────────────────────
+
+  async function fetchFavorites(userId) {
+    const sb = client();
+    if (!sb || !userId) return [];
+    const { data, error } = await sb
+      .from(CONFIG.tables.favorites)
+      .select('id_evento')
+      .eq('id_usuario', userId);
+    if (error) { console.warn('[DB] fetchFavorites:', error); return []; }
+
+    const dbEventIds = (data || []).map(r => r.id_evento);
+    if (!dbEventIds.length) return [];
+
+    // Map DB event ids back to local event ids
+    const map = _getEventMap();
+    const dbToLocal = Object.fromEntries(Object.entries(map).map(([k, v]) => [Number(v), k]));
+    return dbEventIds.map(dbId => dbToLocal[dbId]).filter(Boolean);
+  }
+
+  async function toggleFavorite(userId, eventId) {
+    const sb = client();
+    if (!sb || !userId || !eventId) return null;
+
+    const map = _getEventMap();
+    const dbEventId = map[eventId] ? Number(map[eventId]) : null;
+    if (!dbEventId) { console.warn('[DB] toggleFavorite: evento no mapeado:', eventId); return null; }
+
+    const { data: existing } = await sb
+      .from(CONFIG.tables.favorites)
+      .select('id')
+      .eq('id_usuario', userId)
+      .eq('id_evento', dbEventId)
+      .maybeSingle();
+
+    if (existing?.id) {
+      // Already liked — remove it
+      const { error } = await sb
+        .from(CONFIG.tables.favorites)
+        .delete()
+        .eq('id', existing.id);
+      if (error) throw error;
+      return false; // now unliked
+    }
+
+    // Not liked yet — add it
+    const { error } = await sb
+      .from(CONFIG.tables.favorites)
+      .insert({ id_usuario: userId, id_evento: dbEventId });
+    if (error) throw error;
+    return true; // now liked
+  }
+
   return {
     client,
     isReady,
@@ -637,9 +814,15 @@ window.DB = (() => {
     syncIdentity,
     ensureEventRecord,
     saveEventRecord,
+    deleteEventRecord,
     fetchAllEvents,
     fetchEventSales,
     createTicketPurchase,
     fetchUserTickets,
+    fetchHeroSlides,
+    saveHeroSlide,
+    deleteHeroSlide,
+    fetchFavorites,
+    toggleFavorite,
   };
 })();

@@ -109,19 +109,48 @@ window.Zones = (() => {
   }
 
   function _persistHeroSlides() {
+    // Legacy localStorage fallback — BD is the primary store now
     _saveJSON(STORAGE_KEYS.heroSlides, HERO_SLIDES.map(slide => ({ ...slide })));
   }
 
   function _loadHeroSlides() {
+    // Try localStorage as immediate cache while DB loads async
     const storedSlides = _loadJSON(STORAGE_KEYS.heroSlides, null);
     if (!Array.isArray(storedSlides) || !storedSlides.length) return;
-
     const normalized = storedSlides
       .filter(slide => slide?.eventId && _event(slide.eventId))
       .map(slide => ({ ...slide }));
-
     if (!normalized.length) return;
     HERO_SLIDES.splice(0, HERO_SLIDES.length, ...normalized);
+  }
+
+  async function _loadRealHeroSlides() {
+    if (typeof DB === 'undefined' || !DB.fetchHeroSlides) return;
+    try {
+      const dbSlides = await DB.fetchHeroSlides();
+      if (!dbSlides || !dbSlides.length) return;
+
+      const slides = dbSlides.map(row => {
+        const localId = row.eventId;
+        const event = _event(localId);
+        if (!event) return null;
+        return {
+          eventId: localId,
+          title: row.title || event.title,
+          sub: row.sub || `${event.artist} - ${event.city}`,
+          cta: row.cta || `Ver ${event.title}`,
+          image: event.image,
+        };
+      }).filter(Boolean);
+
+      if (slides.length) {
+        HERO_SLIDES.splice(0, HERO_SLIDES.length, ...slides);
+        _persistHeroSlides();
+        Carousel.refresh?.();
+      }
+    } catch (err) {
+      console.warn('[Dashboard] No se pudieron cargar los slides del carrusel:', err);
+    }
   }
 
   function _loadCustomEvents() {
@@ -194,25 +223,44 @@ window.Zones = (() => {
           added = true;
         } else {
           // Sync organizer email if it exists
-          if (dbEvent.organizerId) {
-             const existing = EVENTS.find(e => e.id === dbEvent.id);
-             if (existing && !existing.organizerId) {
-                existing.organizerId = dbEvent.organizerId;
-             }
+          const existing = EVENTS.find(e => e.id === dbEvent.id);
+          if (existing) {
+            if (dbEvent.organizerId && !existing.organizerId) {
+              existing.organizerId = dbEvent.organizerId;
+            }
+            // Sync price from DB if available (overrides localStorage)
+            if (dbEvent.ticketPrice > 0) {
+              existing.ticketPrice = dbEvent.ticketPrice;
+              if (_state[existing.id]) {
+                _state[existing.id].price = dbEvent.ticketPrice;
+              }
+            }
+            if (dbEvent.ticketCapacity > 0) {
+              existing.ticketCapacity = dbEvent.ticketCapacity;
+              if (_state[existing.id]) {
+                _state[existing.id].capacity = dbEvent.ticketCapacity;
+              }
+            }
           }
         }
       });
       if (added) {
-        const storedState = _loadJSON(STORAGE_KEYS.ticketState, {});
         EVENTS.forEach(event => {
           if (!_state[event.id]) {
-            const current = storedState[event.id] || {};
+            // Use ticketPrice from DB event directly (no localStorage fallback)
             _state[event.id] = {
-              price: Number(current.price ?? event.ticketPrice ?? 0),
-              capacity: Number(current.capacity ?? event.ticketCapacity ?? 0),
+              price: Number(event.ticketPrice ?? 0),
+              capacity: Number(event.ticketCapacity ?? 0),
             };
           }
         });
+        _persistState();
+        if (typeof Grid !== 'undefined' && Grid.build) Grid.build();
+        if (document.getElementById('page-dashboard')?.classList.contains('active')) {
+          _refreshPanels();
+        }
+      } else {
+        // Even if nothing was added, rebuild grid so prices show correctly
         _persistState();
         if (typeof Grid !== 'undefined' && Grid.build) Grid.build();
         if (document.getElementById('page-dashboard')?.classList.contains('active')) {
@@ -226,7 +274,8 @@ window.Zones = (() => {
 
   function init() {
     _loadCustomEvents();
-    _loadHeroSlides();
+    _loadHeroSlides(); // Load from local cache immediately
+    void _loadRealHeroSlides(); // Then sync from BD
     const storedState = _loadJSON(STORAGE_KEYS.ticketState, {});
     EVENTS.forEach(event => {
       const current = storedState[event.id] || _state[event.id] || {};
@@ -453,8 +502,10 @@ window.Zones = (() => {
             <div class="db-manage-metric"><span>Vendidos reales</span><strong>${_numberLabel(sold)}</strong></div>
             <div class="db-manage-metric"><span>Disponibles</span><strong>${_numberLabel(remaining)}</strong></div>
           </div>
-          <div class="db-manage-actions">
-            <button class="db-btn db-btn-primary" onclick="Zones.saveTicketConfig('${event.id}')">Guardar cambios</button>
+          <div class="db-manage-actions" style="display:flex;gap:8px;">
+            <button class="db-btn db-btn-secondary" style="color:#2563eb;border-color:#2563eb;background:rgba(37,99,235,.05);display:flex;align-items:center;gap:4px;padding:8px 12px" title="Ver evento" onclick="Pages.openEvent('${event.id}')"><span class="material-symbols-outlined" style="font-size:18px">visibility</span></button>
+            <button class="db-btn db-btn-primary" style="flex:1" onclick="Zones.saveTicketConfig('${event.id}')">Guardar</button>
+            <button class="db-btn db-btn-secondary" style="color:#ef4444;border-color:transparent;background:rgba(239,68,68,.1);padding:8px 12px" title="Borrar evento" onclick="Zones.deleteEvent('${event.id}')"><span class="material-symbols-outlined" style="font-size:18px">delete</span></button>
           </div>
         </div>
       </div>`;
@@ -556,7 +607,7 @@ window.Zones = (() => {
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">
         ${active.map(event => {
           const featured = HERO_SLIDES.some(slide => slide.eventId === event.id);
-          return `<div style="background:#fff;border:1px solid ${featured ? 'rgba(138,43,226,.4)' : '#e2e8f0'};border-radius:14px;overflow:hidden;${featured ? 'box-shadow:0 0 0 2px rgba(138,43,226,.2)' : ''}"><div style="position:relative;height:130px;overflow:hidden"><img src="${event.image}" alt="${event.title}" style="width:100%;height:100%;object-fit:cover"/>${featured ? '<div style="position:absolute;top:8px;right:8px;background:rgba(138,43,226,.9);color:#fff;font-size:.65rem;font-weight:700;padding:3px 9px;border-radius:999px">En carrusel</div>' : ''}</div><div style="padding:12px"><div style="font-size:.8rem;font-weight:700;color:#0f172a;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${event.title}</div><div style="font-size:.7rem;color:#64748b;margin-bottom:10px">${event.artist} · ${event.city}</div><button class="db-btn ${featured ? 'db-btn-secondary' : 'db-btn-primary'}" style="width:100%;font-size:.75rem" onclick="Zones.promoteToCarousel('${event.id}')" ${featured ? 'disabled' : ''}>${featured ? 'Ya en Carrusel' : 'Promocionar'}</button></div></div>`;
+          return `<div style="background:#fff;border:1px solid ${featured ? 'rgba(138,43,226,.4)' : '#e2e8f0'};border-radius:14px;overflow:hidden;${featured ? 'box-shadow:0 0 0 2px rgba(138,43,226,.2)' : ''}"><div style="position:relative;height:130px;overflow:hidden"><img src="${event.image}" alt="${event.title}" style="width:100%;height:100%;object-fit:cover"/>${featured ? '<div style="position:absolute;top:8px;right:8px;background:rgba(138,43,226,.9);color:#fff;font-size:.65rem;font-weight:700;padding:3px 9px;border-radius:999px">En carrusel</div>' : ''}</div><div style="padding:12px"><div style="font-size:.8rem;font-weight:700;color:#0f172a;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${event.title}</div><div style="font-size:.7rem;color:#64748b;margin-bottom:10px">${event.artist} · ${event.city}</div>${featured ? `<button class="db-btn db-btn-secondary" style="width:100%;font-size:.75rem;color:#ef4444;border-color:#fca5a5;background:rgba(239,68,68,.05)" onclick="Zones.demoteFromCarousel('${event.id}')">Quitar del Carrusel</button>` : `<button class="db-btn db-btn-primary" style="width:100%;font-size:.75rem" onclick="Zones.promoteToCarousel('${event.id}')">Promocionar</button>`}</div></div>`;
         }).join('')}
       </div>`;
   }
@@ -749,18 +800,76 @@ window.Zones = (() => {
     }
   }
 
-  function promoteToCarousel(id) {
+  async function promoteToCarousel(id) {
     const event = _event(id);
     if (!event) return;
     if (HERO_SLIDES.some(slide => slide.eventId === id)) {
       _toast('Este evento ya esta en el carrusel del inicio', 'success');
       return;
     }
-    HERO_SLIDES.push({ title: event.title, sub: `${event.artist} - ${event.city}`, cta: `Ver ${event.title}`, eventId: event.id, image: event.image });
+    const slide = { title: event.title, sub: `${event.artist} - ${event.city}`, cta: `Ver ${event.title}`, eventId: event.id, image: event.image };
+    HERO_SLIDES.push(slide);
     _persistHeroSlides();
     Carousel.refresh?.();
     _toast(`"${event.title}" ahora aparece en el carrusel`, 'success');
     if (document.getElementById('panel-promote')?.classList.contains('active')) _activatePanel('promote');
+    // Persist to BD
+    try {
+      if (typeof DB !== 'undefined' && DB.saveHeroSlide) {
+        await DB.saveHeroSlide({ eventId: id, title: slide.title, sub: slide.sub, cta: slide.cta, orden: HERO_SLIDES.length - 1 });
+      }
+    } catch (err) {
+      console.warn('[Dashboard] No se pudo guardar el slide en BD:', err);
+    }
+  }
+
+  async function demoteFromCarousel(id, silent = false) {
+    const slideIdx = HERO_SLIDES.findIndex(slide => slide.eventId === id);
+    if (slideIdx !== -1) {
+      HERO_SLIDES.splice(slideIdx, 1);
+      _persistHeroSlides();
+      Carousel.refresh?.();
+      if (!silent) {
+         _toast('El evento ha sido quitado del carrusel', 'success');
+         if (document.getElementById('panel-promote')?.classList.contains('active')) _activatePanel('promote');
+      }
+      // Delete from BD
+      try {
+        if (typeof DB !== 'undefined' && DB.deleteHeroSlide) {
+          await DB.deleteHeroSlide(id);
+        }
+      } catch (err) {
+        console.warn('[Dashboard] No se pudo borrar el slide en BD:', err);
+      }
+    }
+  }
+
+  async function deleteEvent(id) {
+    if (!confirm('¿Estás seguro de que deseas eliminar este evento permanentemente? Esta acción no se puede deshacer.')) return;
+    
+    try {
+      if (typeof DB !== 'undefined' && DB.deleteEventRecord) {
+        await DB.deleteEventRecord(id);
+      }
+    } catch(err) {
+      console.warn('[Dashboard] Fallo al borrar de base de datos:', err);
+    }
+    
+    const idx = EVENTS.findIndex(e => e.id === id);
+    if (idx !== -1) {
+      EVENTS.splice(idx, 1);
+    }
+    
+    delete _state[id];
+    delete _liveSales[id];
+    _persistState();
+    _persistCustomEvents();
+    
+    demoteFromCarousel(id, true);
+    
+    _toast('Evento eliminado', 'success');
+    _refreshPanels();
+    if (typeof Grid !== 'undefined' && Grid.build) Grid.build();
   }
 
   function copyBankNumber(value) {
@@ -821,6 +930,8 @@ window.Zones = (() => {
     resetCreateForm,
     createEvent,
     promoteToCarousel,
+    demoteFromCarousel,
+    deleteEvent,
     copyBankNumber,
   };
 })();
